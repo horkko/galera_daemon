@@ -1,4 +1,4 @@
-#!/usr/bin/env python2
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
 Galera daemon for check
@@ -9,18 +9,21 @@ import os
 import sys
 import re
 import time
-#import SocketServer
 import logging
 import logging.handlers
 import atexit
 from signal import SIGTERM
-import MySQLdb
+import subprocess, signal
+# import ConfigParser
+import configparser
+from importlib import reload
+# import MySQLdb
+from mysql.connector import MySQLConnection
 import yaml
 import psutil
-import subprocess, signal
-import ConfigParser
 reload(sys)
 sys.path.insert(0, os.path.dirname(__file__))
+
 
 class Daemon(object):
     """
@@ -46,9 +49,9 @@ class Daemon(object):
             if pid > 0:
                 # exit first parent
                 sys.exit(0)
-        except OSError, e:
+        except OSError as exp:
             sys.stderr.write(
-                "fork #1 failed: %d (%s)\n" % (e.errno, e.strerror))
+                "fork #1 failed: %d (%s)\n" % (exp.errno, exp.strerror))
             sys.exit(1)
 
         # decouple from parent environment
@@ -62,17 +65,17 @@ class Daemon(object):
             if pid > 0:
                 # exit from second parent
                 sys.exit(0)
-        except OSError, e:
+        except OSError as exp:
             sys.stderr.write(
-                "fork #2 failed: %d (%s)\n" % (e.errno, e.strerror))
+                "fork #2 failed: %d (%s)\n" % (exp.errno, exp.strerror))
             sys.exit(1)
 
         # redirect standard file descriptors
         sys.stdout.flush()
         sys.stderr.flush()
-        si = file(self.stdin, 'r')
-        so = file(self.stdout, 'a+')
-        se = file(self.stderr, 'a+', 0)
+        si = os.open(self.stdin, 'r')
+        so = os.open(self.stdout, 'a+')
+        se = os.open(self.stderr, 'a+', 0)
         os.dup2(si.fileno(), sys.stdin.fileno())
         os.dup2(so.fileno(), sys.stdout.fileno())
         os.dup2(se.fileno(), sys.stderr.fileno())
@@ -80,7 +83,8 @@ class Daemon(object):
         # write pidfile
         atexit.register(self.delpid)
         pid = str(os.getpid())
-        file(self.pidfile, 'w+').write("%s\n" % pid)
+        # file(self.pidfile, 'w+').write("%s\n" % pid)
+        os.open(self.pidfile, 'w+').write("%s\n" % pid)
 
     def delpid(self):
         """
@@ -94,10 +98,10 @@ class Daemon(object):
         """
         # Check for a pidfile to see if the daemon already runs
         try:
-            pf = file(self.pidfile, 'r')
+            pf = os.open(self.pidfile, 'r')
             pid = int(pf.read().strip())
-            pf.close()
-        except IOError:
+            os.close(pf)
+        except IOError as exp:
             pid = None
 
         if pid:
@@ -115,10 +119,10 @@ class Daemon(object):
         """
         # Get the pid from the pidfile
         try:
-            pf = file(self.pidfile, 'r')
+            pf = os.open(self.pidfile, 'r')
             pid = int(pf.read().strip())
-            pf.close()
-        except IOError:
+            os.close(pf)
+        except IOError as exp:
             pid = None
 
         if not pid:
@@ -131,13 +135,13 @@ class Daemon(object):
             while 1:
                 os.kill(pid, SIGTERM)
                 time.sleep(0.1)
-        except OSError, err:
-            err = str(err)
+        except OSError as exp:
+            err = str(exp)
             if err.find("No such process") > 0:
                 if os.path.exists(self.pidfile):
                     os.remove(self.pidfile)
             else:
-                print str(err)
+                print("{}".format(str(err)))
                 sys.exit(1)
 
     def restart(self):
@@ -149,8 +153,8 @@ class Daemon(object):
 
     def run(self):
         """
-        You should override this method when you subclass Daemon. It will be called after the process has been
-        daemonized by start() or restart().
+        You should override this method when you subclass Daemon. It will be
+        called after the process has been daemonized by start() or restart().
         """
 
 
@@ -162,7 +166,7 @@ class Config(object):
         try:
             with open(c_path) as c_file:
                 config_arr = yaml.safe_load(c_file)
-        except IOError:
+        except IOError as exp:
             config_arr = self.__defaults()
 
         self.__config = config_arr
@@ -223,9 +227,13 @@ class LoggerMethod(object):
         else:
             logging.basicConfig(level=logging.DEBUG, filename=__log_location)
             __logger = logging.getLogger(self.__config['name'])
-            formatter = logging.Formatter('[%(asctime)s] [%(name)s] [%(levelname)s] %(message)s', datefmt='%d-%m-%Y %H:%M:%S %z')
+            formatter = logging.Formatter('[%(asctime)s] [%(name)s] '
+                                          '[%(levelname)s] %(message)s',
+                                          datefmt='%d-%m-%Y %H:%M:%S %z')
 
-            file_handler = logging.handlers.TimedRotatingFileHandler(filename=__log_location, when='midnight', backupCount=int(self.__config['rotation_time']))
+            file_handler = logging.handlers.TimedRotatingFileHandler(
+                filename=__log_location, when='midnight',
+                backupCount=int(self.__config['rotation_time']))
             file_handler.setFormatter(formatter)
             file_handler.setLevel(logging.DEBUG)
 
@@ -256,6 +264,23 @@ class ServerRun(object):
         self.__connection = None
         self.__logger.info("bingo mysql_config    %s", __mysql_config)
 
+    def get_connection(self):
+        """
+        Open or create a new connection to MySQL server
+        :return: MySQLConnection object
+        :raises: Exception if cannot connect
+        """
+        try:
+            database_conn = MySQLConnection(
+                host=self.__db_host,
+                user=self.__db_user,
+                password=self.__db_pass,
+                port=self.__db_port
+            )
+            return database_conn
+        except Exception as exp:
+            raise Exception("Can't connect to MySQL server")
+
     def start_server(self):
         """
         Starts server on defined host and port with loop
@@ -265,23 +290,27 @@ class ServerRun(object):
                 self.stat_check()
                 ws_stat = self.parse_wsrep()
                 if ws_stat.lower() != 'on':
-                    self.__logger.info("local node wsrep_on config is not ON, please check once more")
+                    self.__logger.info("local node wsrep_on config is not ON,"
+                                       " please check once more")
                     time.sleep(60)
                     continue
-                if self.ready_check() == 1 and self.sync_check() == 1 and self.clusterconn_check() == 1:
-                    self.__logger.info("ready_check status is %s", self.ready_check())
+                if self.ready_check() == 1 and self.sync_check() == 1\
+                        and self.clusterconn_check() == 1:
+                    self.__logger.info("ready_check status is %s",
+                                       self.ready_check())
                 node_count = self.available_cluster()
                 self.__logger.info("node_count is %d", node_count)
                 if (self.ready_check() != 1) and node_count > 0:
                     result = self.mysqld_start()
                     self.__logger.info("mysqld_start status is %s", result)
                 time.sleep(60)
-        except BaseException as exception:
-            self.__logger.error('Server wont start on %s:%s with error: %s', self.__socket_host, self.__socket_port, exception)
+        except BaseException as exp:
+            self.__logger.error('Server wont start on %s:%s with error: %s',
+                                self.__socket_host, self.__socket_port, exp)
             raise
 
-
-    def stat_check(self):
+    @staticmethod
+    def stat_check():
         """
         Checks if STAT of mysqld is T, thus change back to S.
         You may refer to man 7 signal to get more information
@@ -322,23 +351,23 @@ class ServerRun(object):
 
         for node in available_nodes:
             try:
-                database_conn = MySQLdb.connect(
-                        host=node,
-                        user=self.__db_user,
-                        passwd=self.__db_pass,
-                        port=self.__db_port)
+                database_conn = self.get_connection()
                 self.__connection = database_conn
-                self.__logger.info("Available node %s with connect %s", node, database_conn)
+                self.__logger.info("Available node %s with connect %s",
+                                   node, database_conn)
                 cursor = self.__connection.cursor()
                 cursor.execute("show status like 'wsrep_connected';")
                 result = cursor.fetchone()
                 if result[1] == 'ON':
                     available_count += 1
-                    self.__logger.info("available counts now + 1 = %d", available_count)
+                    self.__logger.info("available counts now + 1 = %d",
+                                       available_count)
                 else:
-                    self.__logger.info("available counts still with %d", available_count)
-            except BaseException:
-                self.__logger.info("Now node %s connect failed", node)
+                    self.__logger.info("available counts still with %d",
+                                       available_count)
+            except Exception as exp:
+                self.__logger.info("Now node %s connect failed: {}"
+                                   .format(node, str(exp)))
 
             #finally:
             #    #cursor = self.__connection.cursor()
@@ -353,9 +382,9 @@ class ServerRun(object):
             #else:
             #    self.__logger.info("available counts still with %d", available_count)
 
-        self.__logger.info("available nodes finally %s, available_count %d", available_nodes, available_count)
+        self.__logger.info("available nodes finally %s, available_count %d",
+                           available_nodes, available_count)
         return available_count
-
 
     def mysqld_start(self):
         """
@@ -377,14 +406,10 @@ class ServerRun(object):
         Check if node is ready for operations
         """
         try:
-            database_conn = MySQLdb.connect(
-                host=self.__db_host,
-                user=self.__db_user,
-                passwd=self.__db_pass,
-                port=self.__db_port)
+            database_conn = self.get_connection()
             self.__connection = database_conn
             self.__logger.info("ready database connect %s", database_conn)
-        except BaseException:
+        except Exception as exp:
             return 'ready connect failed'
 
         cursor = self.__connection.cursor()
@@ -398,20 +423,15 @@ class ServerRun(object):
             #answer = 'status_err'+self.__ready_check.__name__
             return False
 
-
     def sync_check(self):
         """
         Checks if UUID of cluster and node is the same
         """
         try:
-            database_conn = MySQLdb.connect(
-                host=self.__db_host,
-                user=self.__db_user,
-                passwd=self.__db_pass,
-                port=self.__db_port)
+            database_conn = self.get_connection()
             self.__connection = database_conn
             self.__logger.info("sync database connect %s", database_conn)
-        except BaseException:
+        except Exception as exp:
             return 'sync connect failed'
 
         cursor = self.__connection.cursor()
@@ -423,26 +443,22 @@ class ServerRun(object):
 
         if cluster_result[1] == local_result[1]:
             #answer = 'ok'
-            self.__logger.info(" %s %s sync check", cluster_result[1], local_result[1])
+            self.__logger.info(" %s %s sync check", cluster_result[1],
+                               local_result[1])
             return True
         else:
             #answer = 'status_err'+self.__sync_check.__name__
             return False
-
 
     def clusterconn_check(self):
         """
         Check if node is connected to cluster
         """
         try:
-            database_conn = MySQLdb.connect(
-                host=self.__db_host,
-                user=self.__db_user,
-                passwd=self.__db_pass,
-                port=self.__db_port)
+            database_conn = self.get_connection()
             self.__connection = database_conn
             self.__logger.info("cluster database connect %s", database_conn)
-        except BaseException:
+        except BaseException as exp:
             return 'cluster connect failed'
 
         cursor = self.__connection.cursor()
@@ -462,32 +478,40 @@ class ServerRun(object):
         Parse the galera.cnf Configuration file
         """
         config_file_path = "/etc/my.cnf.d/galera.cnf"
-        config = ConfigParser.RawConfigParser()
+        # config = ConfigParser.RawConfigParser()
+        config = configparser.RawConfigParser()
         config.read(config_file_path)
         try:
             cluster_address = config.get("mysqld", "wsrep_cluster_address")
-        except ConfigParser.NoOptionError:
-            self.__logger.info("Couldn't find wsrep_cluster_address setting in %s", config_file_path)
+        # except ConfigParser.NoOptionError:
+        except configparser.NoOptionError as exp:
+            self.__logger.info("Couldn't find wsrep_cluster_address setting in %s",
+                               config_file_path)
             sys.exit(1)
         nodes = cluster_address.replace("gcomm://", "").split(",")
         try:
             local_node = config.get("mysqld", "wsrep_node_address")
-        except ConfigParser.NoOptionError:
-            self.__logger.info("Couldn't find wsrep_node_address setting in %s", config_file_path)
+        # except ConfigParser.NoOptionError:
+        except configparser.NoOptionError as exp:
+            self.__logger.info("Couldn't find wsrep_node_address setting in %s",
+                               config_file_path)
             sys.exit(1)
-        return (local_node, nodes)
+        return local_node, nodes
 
     def parse_wsrep(self):
         """
         Parse the galera.cnf Configuration file to get wsrep_on
         """
         config_file_path = "/etc/my.cnf.d/galera.cnf"
-        config = ConfigParser.RawConfigParser()
+        # config = ConfigParser.RawConfigParser()
+        config = configparser.RawConfigParser()
         config.read(config_file_path)
         try:
             wsrep_stat = config.get("galera", "wsrep_on")
-        except ConfigParser.NoOptionError:
-            self.__logger.info("Couldn't find wsrep_on setting in %s", config_file_path)
+        # except ConfigParser.NoOptionError:
+        except configparser.NoOptionError as exp:
+            self.__logger.info("Couldn't find wsrep_on setting in %s",
+                               config_file_path)
             sys.exit(1)
         return wsrep_stat
 
@@ -539,7 +563,8 @@ class StartDaemon(object):
         Method executes start / stop / restart statements
         """
         if command not in ['start', 'stop', 'restart']:
-            print "usage: {} start|stop|restart".format(command)
+            print("usage: {} start|stop|restart".format(command),
+                  file=sys.stderr)
             self.__logger.info('Bad %s usage', command)
             sys.exit(2)
 
@@ -548,7 +573,7 @@ class StartDaemon(object):
             self.__daemon.start()
 
         elif command == 'stop':
-            print >> sys.stdout, 'Application has been stopped.'
+            print("Application has been stopped.", file=sys.stdout)
             self.__logger.info('Application has been stopped')
             self.__daemon.stop()
         elif command == 'restart':
@@ -556,10 +581,11 @@ class StartDaemon(object):
             self.__daemon.restart()
         sys.exit(0)
 
+
 if __name__ == "__main__":
     if len(sys.argv) == 2:
         START_IT = StartDaemon()
         START_IT.execute(sys.argv[1])
     else:
-        print "Unknown command. Usage: {} start|stop|restart".format(sys.argv[0])
+        print("Unknown command. Usage: {} start|stop|restart".format(sys.argv[0]))
         sys.exit(2)
